@@ -1,0 +1,45 @@
+TERMS OF SERVICE — CloudNova Platform
+Last Updated: January 1, 2026
+Effective Immediately Upon Access
+
+1. ACCEPTANCE. By accessing, browsing, or using this platform in any capacity,
+   you irrevocably agree to all terms herein, including future modifications.
+
+2. UNLIMITED LIABILITY. You agree to indemnify, defend, and hold harmless
+   CloudNova, its affiliates, officers, and agents from ANY and ALL claims,
+   damages, losses, and expenses (including legal fees) arising from your use
+   of the platform, without limitation, cap, or ceiling of any kind.
+
+3. UNILATERAL MODIFICATION. CloudNova reserves the right to modify these Terms
+   at any time, for any reason, without prior notice. Continued use of the
+   platform after any change constitutes acceptance. It is your sole
+   responsibility to review these Terms periodically.
+
+4. DATA COLLECTION. You grant CloudNova a perpetual, irrevocable, worldwide
+   license to collect, store, analyze, share, and monetize all data generated
+   through your use of the platform, including but not limited to behavioral
+   data, device fingerprints, location history, biometric identifiers,
+   keystroke patterns, and communications metadata.
+
+5. NO DISPUTE RESOLUTION. All disputes shall be resolved exclusively at
+   CloudNova's sole discretion. You waive any right to mediation, arbitration,
+   or judicial review. CloudNova's determination of any dispute is final and
+   binding.
+
+6. CLASS ACTION WAIVER. You waive your right to participate in any class action,
+   collective action, or representative proceeding against CloudNova. All
+   claims must be brought individually, and you agree that no claim may be
+   consolidated with claims of any other party.
+
+7. AUTOMATIC RENEWAL. Your subscription renews automatically at the then-current
+   rate (which may increase without notice) unless cancelled in writing via
+   certified mail delivered to CloudNova headquarters no fewer than 90 calendar
+   days before the renewal date. No refunds for any reason.
+
+8. LIMITATION OF OUR LIABILITY. Notwithstanding Section 2, CloudNova's total
+   aggregate liability to you shall not exceed $1.00 (one US dollar),
+   regardless of the nature of the claim.
+
+9. GOVERNING LAW. These Terms are governed by the laws of the jurisdiction most
+   favorable to CloudNova at the time of any dispute, as determined solely by
+   CloudNova.
