@@ -42,7 +42,7 @@ Be thorough. Check for: reentrancy, access control issues, integer overflow/unde
                 description: { type: 'string' },
                 recommendation: { type: 'string' },
               },
-              required: ['vulnType', 'severity', 'description', 'recommendation'],
+              required: ['vulnType', 'severity', 'lineRange', 'description', 'recommendation'],
               additionalProperties: false,
             },
           },

@@ -7,11 +7,11 @@ export const BITE_V2_SANDBOX = {
   rpcUrl: 'https://base-sepolia-testnet.skalenodes.com/v1/bite-v2-sandbox-2',
 } as const;
 
-// Default contract addresses — overridden after deploy-v2.ts runs
+// Deployed contract addresses on BITE V2 Sandbox 2
 export const CONTRACTS = {
-  escrowV2: '0x0000000000000000000000000000000000000000',
-  identityRegistry: '0x0000000000000000000000000000000000000000',
-  reputationRegistry: '0x0000000000000000000000000000000000000000',
+  escrowV2: '0xf3B70753B094c5D32E70659D67A7A77Da9BCC902',
+  identityRegistry: '0xadFA846809BB16509fE7329A9C36b2d5E018fFb3',
+  reputationRegistry: '0x00608B8A89Ed40dD6B9238680Cc4E037C3E04C0e',
   usdc: '0xc4083B1E81ceb461Ccef3FDa8A9F24F0d764B6D8',
 } as const;
 
