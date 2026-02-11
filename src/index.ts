@@ -14,6 +14,9 @@ export { initClient as initOpenAI, callLLM, getUsage } from './openai-client.js'
 export { AGENT_REGISTRY, getAgentsByCategory, getAgentByName } from './agents/registry.js';
 export * from './twinkle-config.js';
 export * from './types.js';
+export { TwinkleClient } from './sdk/index.js';
+export { BiteModule, EscrowModule, IdentityModule, ReputationModule } from './sdk/index.js';
+export type { TwinkleClientConfig, CreateEscrowParams, EscrowData, EscrowStatus, BiteEncryptResult, BiteDecryptResult, BiteCommitResult } from './sdk/index.js';
 export type { AP2Mandate, IntentMandate, CartMandate, PaymentMandate, MandateChain } from './ap2-mandates.js';
 export type { X402PurchaseResult } from './x402-client.js';
 export type { AgentDefinition, RunningAgent } from './define-agent.js';

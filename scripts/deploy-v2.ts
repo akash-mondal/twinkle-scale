@@ -1,5 +1,5 @@
-// Deploy PixieEscrowV2 + IdentityRegistry + ReputationRegistry to BITE V2 chain.
-// Uses pre-compiled Foundry artifacts from pixie-lab.
+// Deploy TwinkleEscrowV2 + IdentityRegistry + ReputationRegistry to BITE V2 chain.
+// Uses pre-compiled Foundry artifacts from contracts/out.
 
 import 'dotenv/config';
 import { ethers } from 'ethers';
@@ -10,13 +10,13 @@ const V2_RPC = process.env.RPC_URL || 'https://base-sepolia-testnet.skalenodes.c
 const BUYER_PK = process.env.BUYER_PK!;
 const V2_USDC = process.env.USDC_ADDRESS || '0xc4083B1E81ceb461Ccef3FDa8A9F24F0d764B6D8';
 
-// Paths to Foundry artifacts
-const ARTIFACTS_DIR = resolve(process.cwd(), '../Pixie/pixie-lab/contracts/out');
+// Paths to Foundry artifacts — local to this repo
+const ARTIFACTS_DIR = resolve(process.cwd(), 'contracts/out');
 
 function loadArtifact(name: string): { abi: any[]; bytecode: string } {
   const path = resolve(ARTIFACTS_DIR, `${name}.sol/${name}.json`);
   if (!existsSync(path)) {
-    throw new Error(`Artifact not found: ${path}. Run 'forge build' in pixie-lab/contracts/ first.`);
+    throw new Error(`Artifact not found: ${path}. Run 'forge build' in contracts/ first.`);
   }
   const artifact = JSON.parse(readFileSync(path, 'utf-8'));
   return { abi: artifact.abi, bytecode: artifact.bytecode.object };
@@ -52,13 +52,13 @@ async function main() {
   console.log(`  Chain block: ${block}\n`);
 
   // Deploy contracts
-  const escrowAddr = await deploy(wallet, 'PixieEscrowV2');
-  const identityAddr = await deploy(wallet, 'PixieIdentityRegistry');
-  const reputationAddr = await deploy(wallet, 'PixieReputationRegistry');
+  const escrowAddr = await deploy(wallet, 'TwinkleEscrowV2');
+  const identityAddr = await deploy(wallet, 'TwinkleIdentityRegistry');
+  const reputationAddr = await deploy(wallet, 'TwinkleReputationRegistry');
 
   // Configure escrow
   console.log('\n  Configuring escrow guardrails...');
-  const { abi } = loadArtifact('PixieEscrowV2');
+  const { abi } = loadArtifact('TwinkleEscrowV2');
   const escrow = new ethers.Contract(escrowAddr, abi, wallet) as ethers.Contract;
 
   const tx1 = await (escrow as any).setAllowedToken(V2_USDC, true, { gasLimit: 200000 });

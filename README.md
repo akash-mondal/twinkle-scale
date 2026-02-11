@@ -177,6 +177,122 @@ sequenceDiagram
     Buyer->>Buyer: Structured receipt with all txHashes
 ```
 
+## API Server
+
+REST + SSE backend for frontend integration. Runs on Hono with JWT auth.
+
+| Method | Path | Purpose | Auth |
+|--------|------|---------|------|
+| `GET` | `/api/health` | Server status, chain connectivity | No |
+| `GET` | `/api/agents` | List all 10 agents | No |
+| `GET` | `/api/agents/:name` | Single agent details | No |
+| `POST` | `/api/marketplace/run` | Start marketplace run | Yes |
+| `GET` | `/api/marketplace/events` | SSE real-time stream | Yes |
+| `GET` | `/api/marketplace/receipt/:id` | Fetch receipt | Yes |
+| `GET` | `/api/marketplace/history` | Past runs | Yes |
+| `GET` | `/api/wallet/balance` | USDC + sFUEL balance | Yes |
+| `GET` | `/api/config` | Public chain config | No |
+
+### SSE Event Stream
+
+```mermaid
+sequenceDiagram
+    participant Frontend
+    participant API as Hono API
+    participant Mkt as Marketplace
+    participant Chain as SKALE V2
+
+    Frontend->>API: POST /api/marketplace/run
+    API-->>Frontend: { runId }
+    Frontend->>API: GET /api/marketplace/events
+
+    loop For each Act (4 categories)
+        API-->>Frontend: SSE: agent:start
+        API-->>Frontend: SSE: bite:encrypting
+        Mkt->>Chain: BITE commitEncrypted()
+        API-->>Frontend: SSE: bite:committed
+        Mkt->>Chain: Create escrow
+        API-->>Frontend: SSE: escrow:created
+        API-->>Frontend: SSE: x402:payment
+        API-->>Frontend: SSE: quality:evaluated
+        API-->>Frontend: SSE: escrow:settled
+    end
+
+    API-->>Frontend: SSE: synthesis:complete
+    Frontend->>API: GET /api/marketplace/receipt/:id
+```
+
+## Deployment
+
+### Docker
+
+```bash
+# Build
+docker build -t twinkle .
+
+# Run
+docker compose up -d
+
+# Logs
+docker compose logs -f
+
+# Health check
+curl http://localhost:3001/api/health
+```
+
+### Infrastructure Scripts
+
+```bash
+# Check BITE V2 precompile availability
+npx tsx scripts/check-v2-precompile.ts
+
+# Check x402 facilitator health
+npx tsx scripts/check-facilitator.ts
+
+# Bridge USDC from Base Sepolia → BITE V2 Sandbox 2
+npx tsx scripts/bridge-v2.ts
+
+# Deploy contracts to V2 chain
+npx tsx scripts/deploy-v2.ts
+```
+
+## Settlement Flow
+
+```mermaid
+graph LR
+    subgraph Quality["Quality Gate (GPT-5.2)"]
+        E[Evaluate Delivery]
+        S{Score >= 5?}
+    end
+
+    subgraph OnChain["On-Chain Settlement"]
+        P[verifyAndSettle → PAID]
+        R[claimRefund → REFUNDED]
+        REP[Update Reputation]
+    end
+
+    subgraph AP2["Accountability"]
+        PR[Payment: released]
+        PF[Payment: refunded]
+    end
+
+    E --> S
+    S -->|Yes| P --> REP --> PR
+    S -->|No| R --> REP --> PF
+```
+
+## Build Progress
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| A | Done | Foundation — types, config, env, sample data |
+| B | Done | 10 agent handlers across 4 categories |
+| C | Done | Core infra — OpenAI client, brain, runner, x402, providers |
+| D | Done | Scripts — bridge, deploy, precompile check, facilitator check |
+| E | Done | Demo CLI — 4-act marketplace entry point |
+| F | Done | API server — Hono REST + SSE, Docker, production infra |
+| G | In Progress | Tests + TwinkleEscrowV3 contract |
+
 ## Tracks
 
 Built for the **SF Agentic Commerce x402 Hackathon** (Feb 11-13, 2026):

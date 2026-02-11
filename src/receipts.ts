@@ -1,6 +1,6 @@
 // Receipt builder — structured audit trail with BITE proofs.
 
-import { Pixie } from '@pixie/sdk';
+import { TwinkleClient } from './sdk/index.js';
 import type { AgentReceipt, EncryptionDecision, ProviderResult, BiteLayerResult } from './types.js';
 import type { MandateChain } from './ap2-mandates.js';
 

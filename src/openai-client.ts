@@ -92,7 +92,10 @@ export async function callLLM(opts: CallLLMOptions): Promise<CallLLMResult> {
         // Agentic tool loop
         let rounds = 0;
         while (rounds < maxRounds) {
-          const functionCalls = response.output.filter((item: any) => item.type === 'function_call');
+          const functionCalls = response.output.filter(
+            (item): item is Extract<typeof item, { type: 'function_call' }> =>
+              item.type === 'function_call',
+          );
           if (functionCalls.length === 0) break;
 
           // Execute tool calls
@@ -110,7 +113,7 @@ export async function callLLM(opts: CallLLMOptions): Promise<CallLLMResult> {
             allToolCalls.push({ name: fc.name, args, result });
 
             input.push({
-              type: 'function_call_output',
+              type: 'function_call_output' as const,
               call_id: fc.call_id,
               output: result,
             });

@@ -7,8 +7,8 @@
 // Layer 4: Encrypted Settlement Batch — all decisions revealed simultaneously (encryptMessage)
 // Layer 5: Encryption Decision Reasoning — LLM decides which layers to activate
 
-import { Pixie } from '@pixie/sdk';
-import type { CreateEscrowParams } from '@pixie/sdk';
+import { TwinkleClient } from './sdk/index.js';
+import type { CreateEscrowParams } from './sdk/index.js';
 import { AgentEventEmitter } from './events.js';
 import type { BiteLayer, BiteLayerResult } from './types.js';
 
@@ -18,7 +18,7 @@ export class BiteLayers {
   private activeLayers: BiteLayer[] = [];
 
   constructor(
-    private pixie: Pixie,
+    private client: TwinkleClient,
     private events: AgentEventEmitter,
   ) {}
 
@@ -31,7 +31,7 @@ export class BiteLayers {
       preview: JSON.stringify(strategy).slice(0, 100),
     });
 
-    const result = await this.pixie.bite.commitEncrypted(hex);
+    const result = await this.client.bite.commitEncrypted(hex);
     this.encryptions++;
     this.messages++;
 
@@ -75,7 +75,7 @@ export class BiteLayers {
       amount: params.amount.toString(),
     });
 
-    const result = await this.pixie.escrow.create({
+    const result = await this.client.escrow.create({
       ...params,
       encrypted: true,
     });
@@ -113,7 +113,7 @@ export class BiteLayers {
       preview: query.slice(0, 80),
     });
 
-    const result = await this.pixie.bite.commitEncrypted(hex);
+    const result = await this.client.bite.commitEncrypted(hex);
     this.encryptions++;
     this.messages++;
 
@@ -158,7 +158,7 @@ export class BiteLayers {
       preview: decisions.map(d => `#${d.escrowId}:${d.action}`).join(', '),
     });
 
-    const result = await this.pixie.bite.commitEncrypted(hex);
+    const result = await this.client.bite.commitEncrypted(hex);
     this.encryptions++;
     this.messages++;
 
@@ -201,7 +201,7 @@ export class BiteLayers {
 
     for (let attempt = 0; attempt < 15; attempt++) {
       try {
-        decryptedData = await this.pixie.bite.decryptCommitment(txHash);
+        decryptedData = await this.client.bite.decryptCommitment(txHash);
         break;
       } catch {
         await new Promise(r => setTimeout(r, 1000));

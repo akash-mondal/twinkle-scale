@@ -1,7 +1,7 @@
 // Agent Runner — The main orchestration loop.
 // Integrates all 5 technologies: BITE + x402 + AP2 + ERC-8004 + Escrow.
 
-import { Pixie } from '@pixie/sdk';
+import { TwinkleClient } from './sdk/index.js';
 import { AgentEventEmitter } from './events.js';
 import { BiteLayers } from './bite-layers.js';
 import { AgentBrain } from './brain.js';
@@ -24,7 +24,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
   const qualityThreshold = config.qualityThreshold ?? 5;
   const useX402 = config.useX402 ?? false;
 
-  const buyer = new Pixie({ rpcUrl: config.rpcUrl, privateKey: config.buyerPk });
+  const buyer = new TwinkleClient({ rpcUrl: config.rpcUrl, privateKey: config.buyerPk });
   const brain = new AgentBrain();
   const biteLayers = new BiteLayers(buyer, events);
   const mandates = new MandateTracker();
@@ -107,11 +107,11 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
 
   // Phase 4: Provider Discovery + AP2 Cart Mandates
   console.log('\n[Phase 4] Provider Discovery...');
-  const providerPixies: Array<{ pixie: Pixie; agentId: number; config: typeof config.providerConfigs[0] }> = [];
+  const providerClients: Array<{ client: TwinkleClient; agentId: number; config: typeof config.providerConfigs[0] }> = [];
 
   for (const pc of config.providerConfigs) {
-    const providerPixie = new Pixie({ rpcUrl: config.rpcUrl, privateKey: pc.privateKey });
-    const agentId = await providerPixie.identity.register({
+    const providerClient = new TwinkleClient({ rpcUrl: config.rpcUrl, privateKey: pc.privateKey });
+    const agentId = await providerClient.identity.register({
       uri: `twinkle://${pc.name.toLowerCase()}`,
       metadata: {
         name: pc.name,
@@ -123,12 +123,12 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
     events.emit('provider:discovered', 'discovery', {
       name: pc.name,
       agentId,
-      address: providerPixie.address,
+      address: providerClient.address,
       price: pc.price,
     });
 
     console.log(`  Registered: ${pc.name} (agentId: ${agentId}, $${pc.price})`);
-    providerPixies.push({ pixie: providerPixie, agentId, config: pc });
+    providerClients.push({ client: providerClient, agentId, config: pc });
   }
 
   const selected = await brain.selectProviders(
@@ -147,9 +147,9 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
   });
 
   const cartMandates = new Map<string, CartMandate>();
-  for (const pp of providerPixies) {
+  for (const pp of providerClients) {
     const cart = mandates.createCart({
-      provider: pp.pixie.address,
+      provider: pp.client.address,
       providerName: pp.config.name,
       price: pp.config.price,
       asset: 'USDC',
@@ -170,9 +170,9 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
 
   // Phase 5: Data Purchase
   console.log(`\n[Phase 5] Data Purchase${useX402 ? ' [x402]' : ''}...`);
-  const deliveries: Array<{ provider: typeof providerPixies[0]; data: any; x402Meta?: { cost: string; used: boolean } }> = [];
+  const deliveries: Array<{ provider: typeof providerClients[0]; data: any; x402Meta?: { cost: string; used: boolean } }> = [];
 
-  for (const pp of providerPixies) {
+  for (const pp of providerClients) {
     const endpoint = `http://localhost:${pp.config.port}`;
 
     events.emit('x402:challenge', 'data-purchase', {
@@ -228,10 +228,10 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
   }> = [];
 
   const paymentMandateMap = new Map<number, string>();
-  const escrowAmount = Pixie.parseUsdc('0.10');
+  const escrowAmount = TwinkleClient.parseUsdc('0.10');
 
   for (const d of deliveries) {
-    const requestHash = Pixie.hash(`${config.query}-${d.provider.config.name}-${Date.now()}`);
+    const requestHash = TwinkleClient.hash(`${config.query}-${d.provider.config.name}-${Date.now()}`);
     const deadline = Math.floor(Date.now() / 1000) + 3600;
     const useEncryption = encryptionDecision.layers.includes('escrow');
 
@@ -240,7 +240,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
 
     if (useEncryption) {
       const result = await biteLayers.createEncryptedEscrow({
-        seller: d.provider.pixie.address,
+        seller: d.provider.client.address,
         token: config.token,
         amount: escrowAmount,
         deadline,
@@ -251,7 +251,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
       biteResult = result.biteResult;
     } else {
       const result = await buyer.escrow.create({
-        seller: d.provider.pixie.address,
+        seller: d.provider.client.address,
         token: config.token,
         amount: escrowAmount,
         deadline,
@@ -268,7 +268,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
       };
     }
 
-    const deliveryHash = Pixie.hash(JSON.stringify(d.data.analysis));
+    const deliveryHash = TwinkleClient.hash(JSON.stringify(d.data.analysis));
 
     events.emit('escrow:created', 'escrow-creation', {
       provider: d.provider.config.name,
@@ -285,7 +285,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
       txHash: biteResult.txHash,
       amount: '0.10',
       asset: 'USDC',
-      provider: d.provider.pixie.address,
+      provider: d.provider.client.address,
       x402Cost: d.x402Meta?.cost,
     });
     paymentMandateMap.set(escrowId, paymentMandate.id);
@@ -310,7 +310,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
     const pp = er.delivery.provider;
     const analysis = er.delivery.data.analysis;
 
-    await pp.pixie.escrow.submitResponse(er.escrowId, er.deliveryHash);
+    await pp.client.escrow.submitResponse(er.escrowId, er.deliveryHash);
 
     events.emit('escrow:response', 'delivery', {
       provider: pp.config.name,
@@ -345,7 +345,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentReceipt> {
     providerResults.push({
       name: pp.config.name,
       agentId: pp.agentId,
-      address: pp.pixie.address,
+      address: pp.client.address,
       x402: {
         amount: pp.config.price,
         paid: true,
