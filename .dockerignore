@@ -1,0 +1,12 @@
+node_modules
+.env
+.env.local
+.git
+.claude
+tests
+scripts
+contracts
+*.md
+*.log
+.DS_Store
+dist
