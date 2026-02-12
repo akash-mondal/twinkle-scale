@@ -1,81 +1,36 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity >=0.8.27;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
+import { BITE } from "@skalenetwork/bite-solidity/BITE.sol";
+import { IBiteSupplicant } from "@skalenetwork/bite-solidity/interfaces/IBiteSupplicant.sol";
 
-// ============================================================================
-//  BITE V2 Precompile Interface
-//  Deployed at: 0x0000000000000000000000000000000000000100
-// ============================================================================
-
-/// @title IBITEV2 — Interface for the BITE V2 precompile on SKALE
-/// @notice Provides confidential transaction execution (CTX) via threshold encryption.
-///         `decryptAndExecute` schedules a CTX for block N+1. The CTX is sent by a
-///         one-time random wallet W (returned by `getRandomWalletForCTX`). Contracts
-///         that receive the CTX implement `onDecrypt(decryptedArgs, plainArgs)` where
-///         `msg.sender` is wallet W — NOT the precompile address.
-interface IBITEV2 {
-    /// @notice Schedule a confidential transaction for execution in block N+1.
-    /// @param encryptedArgs  ABI-encoded encrypted payload (decrypted by threshold nodes)
-    /// @param plainArgs      ABI-encoded plaintext payload forwarded as-is to onDecrypt
-    /// @param gasLimit        Gas limit for the CTX callback execution
-    function decryptAndExecute(
-        bytes calldata encryptedArgs,
-        bytes calldata plainArgs,
-        uint256 gasLimit
-    ) external;
-
-    /// @notice Returns the one-time wallet address that will send the next CTX.
-    /// @dev    Caller MUST fund this wallet with enough ETH for the CTX gas cost
-    ///         BEFORE calling `decryptAndExecute`.
-    /// @return wallet  The address of the one-time CTX wallet
-    function getRandomWalletForCTX() external returns (address wallet);
-}
-
-// ============================================================================
-//  Callback Interface — implemented by contracts receiving CTX results
-// ============================================================================
-
-/// @title IBITECallback — Callback for BITE V2 decrypted transaction execution
-interface IBITECallback {
-    /// @notice Called by the one-time wallet W when the CTX executes in block N+1.
-    /// @param decryptedArgs  The decrypted payload (was encrypted when submitted)
-    /// @param plainArgs      The plaintext payload (passed through unchanged)
-    function onDecrypt(bytes calldata decryptedArgs, bytes calldata plainArgs) external;
-}
-
-// ============================================================================
-//  TwinkleEscrowV3
-// ============================================================================
-
-/// @title TwinkleEscrowV3 — Conditional escrow with BITE V2 auto-settlement
-/// @notice Extends the standard buyer-deposits / quality-threshold-settles escrow
-///         pattern with confidential auto-settlement via BITE V2 CTX callbacks.
+/// @title TwinkleEscrowV3 — Conditional escrow with BITE CTX auto-settlement
+/// @notice Quality-gated escrow with two settlement paths:
 ///
-///         Flow A — Manual settlement:
-///           1. Buyer calls `createEscrow(provider, amount, metadataHash)`
-///           2. Buyer (or anyone with authority) calls `verifyAndSettle(escrowId, qualityScore)`
-///           3. Score >= 5 → provider paid; score < 5 → buyer refunded
+///   Flow A — Manual settlement:
+///     1. Buyer creates escrow with `createEscrow()`
+///     2. Buyer settles with `verifyAndSettle(escrowId, qualityScore)`
+///     3. Score >= 5 → provider PAID; score < 5 → buyer REFUNDED
 ///
-///         Flow B — BITE V2 auto-settlement:
-///           1. Buyer calls `createEncryptedEscrow(provider, amount, encryptedConditions)`
-///           2. Buyer calls `prepareAutoSettle(escrowId)` to get & fund one-time wallet W
-///           3. Buyer calls `initiateAutoSettle(escrowId)` to schedule the CTX
-///           4. In block N+1, wallet W calls `onDecrypt(...)` which auto-settles
+///   Flow B — BITE CTX auto-settlement:
+///     1. Buyer creates escrow with `createEncryptedEscrow()`
+///     2. Buyer calls `initiateAutoSettle(escrowId, encryptedScore)` with ETH for CTX gas
+///     3. BITE validators decrypt the score and call `onDecrypt()` in block N+1
+///     4. Contract auto-settles based on decrypted quality score
 ///
-/// @dev    Quality threshold: score >= 5 → PAID (provider), score < 5 → REFUNDED (buyer).
-///         Default timeout is 1 hour. Owner can configure allowedTokens, maxEscrowAmount,
-///         and timeout. Emergency refund available after 2x timeout.
-contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
+/// @dev Requires EVM version istanbul and Solidity >=0.8.27 for BITE compatibility.
+///      Uses official @skalenetwork/bite-solidity library.
+///      SUBMIT_CTX precompile at address(0x1B).
+contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBiteSupplicant {
     using SafeERC20 for IERC20;
+    using Address for address payable;
 
     // ── Constants ───────────────────────────────────────────────────────────
-
-    /// @notice BITE V2 precompile address on SKALE
-    IBITEV2 public constant BITE_V2 = IBITEV2(0x0000000000000000000000000000000000000100);
 
     /// @notice Quality score threshold: >= this value means provider gets paid
     uint8 public constant QUALITY_THRESHOLD = 5;
@@ -83,8 +38,11 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
     /// @notice Default escrow timeout (1 hour)
     uint256 public constant DEFAULT_TIMEOUT = 1 hours;
 
-    /// @notice Emergency refund multiplier — owner can trigger after timeout * this
+    /// @notice Emergency refund available after 2x timeout
     uint256 public constant EMERGENCY_TIMEOUT_MULTIPLIER = 2;
+
+    /// @notice Gas limit for CTX callback execution
+    uint256 public constant CTX_GAS_LIMIT = 500000;
 
     // ── Enums ───────────────────────────────────────────────────────────────
 
@@ -97,39 +55,27 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
     // ── Structs ─────────────────────────────────────────────────────────────
 
     struct Escrow {
-        address buyer;           // depositor / payer
-        address provider;        // service provider / payee
-        address token;           // ERC-20 token (must be in allowedTokens)
-        uint256 amount;          // escrowed amount
-        bytes32 metadataHash;    // hash of off-chain metadata (service description, etc.)
-        Status  status;          // current escrow state
-        uint256 createdAt;       // block.timestamp when created
-        // BITE V2 auto-settle fields
-        bytes   encryptedConditions; // encrypted settlement conditions (empty for manual)
-        address ctxWallet;           // one-time wallet W for CTX callback verification
-        bool    autoSettleInitiated; // whether decryptAndExecute has been called
+        address buyer;
+        address provider;
+        address token;
+        uint256 amount;
+        bytes32 metadataHash;
+        Status  status;
+        uint256 createdAt;
+        address ctxSender;          // callback sender address from submitCTX
+        bool    autoSettleInitiated;
     }
 
     // ── State ───────────────────────────────────────────────────────────────
 
-    /// @notice Token allowlist — only whitelisted tokens can be escrowed
     mapping(address => bool) public allowedTokens;
-
-    /// @notice Maximum amount that can be escrowed in a single escrow
     uint256 public maxEscrowAmount;
-
-    /// @notice Configurable timeout for escrows (default 1 hour)
     uint256 public escrowTimeout;
-
-    /// @notice All escrows by ID
     mapping(uint256 => Escrow) public escrows;
-
-    /// @notice Auto-incrementing escrow counter
     uint256 public escrowCount;
 
     // ── Events ──────────────────────────────────────────────────────────────
 
-    /// @notice Emitted when a new escrow is created (manual or encrypted)
     event EscrowCreated(
         uint256 indexed escrowId,
         address indexed buyer,
@@ -138,22 +84,10 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
         bytes32 metadataHash
     );
 
-    /// @notice Emitted when an escrow is settled (provider paid)
     event EscrowSettled(uint256 indexed escrowId, uint8 qualityScore);
-
-    /// @notice Emitted when an escrow is refunded (buyer refunded)
     event EscrowRefunded(uint256 indexed escrowId);
-
-    /// @notice Emitted when auto-settlement is initiated via BITE V2
-    event AutoSettleInitiated(uint256 indexed escrowId, address ctxWallet);
-
-    /// @notice Emitted when auto-settlement executes via onDecrypt callback
-    /// @param action "PAID" if provider paid, "REFUNDED" if buyer refunded
-    event AutoSettleExecuted(
-        uint256 indexed escrowId,
-        uint8 qualityScore,
-        string action
-    );
+    event AutoSettleInitiated(uint256 indexed escrowId, address ctxSender);
+    event AutoSettleExecuted(uint256 indexed escrowId, uint8 qualityScore, string action);
 
     // ── Errors ──────────────────────────────────────────────────────────────
 
@@ -167,33 +101,31 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
     error EscrowNotExpired(uint256 escrowId, uint256 deadline);
     error EmergencyTimeoutNotReached(uint256 escrowId, uint256 emergencyDeadline);
     error AutoSettleAlreadyInitiated(uint256 escrowId);
-    error AutoSettleNotPrepared(uint256 escrowId);
-    error NoEncryptedConditions(uint256 escrowId);
-    error UnauthorizedCTXWallet(address caller, address expected);
+    error UnauthorizedCallback(address caller, address expected);
 
     // ── Constructor ─────────────────────────────────────────────────────────
 
-    /// @param _maxEscrowAmount  Initial maximum escrow amount
     constructor(uint256 _maxEscrowAmount) Ownable(msg.sender) {
         maxEscrowAmount = _maxEscrowAmount;
         escrowTimeout = DEFAULT_TIMEOUT;
     }
 
+    // ── Receive ─────────────────────────────────────────────────────────────
+
+    /// @notice Accept ETH for CTX gas funding
+    receive() external payable {}
+
     // ── Owner Configuration ─────────────────────────────────────────────────
 
-    /// @notice Set the maximum amount allowed per escrow
     function setMaxEscrowAmount(uint256 _amount) external onlyOwner {
         maxEscrowAmount = _amount;
     }
 
-    /// @notice Whitelist or de-list a token for escrow deposits
     function setAllowedToken(address _token, bool _allowed) external onlyOwner {
         if (_token == address(0)) revert ZeroAddress();
         allowedTokens[_token] = _allowed;
     }
 
-    /// @notice Update the escrow timeout duration
-    /// @param _timeout  New timeout in seconds (must be > 0)
     function setEscrowTimeout(uint256 _timeout) external onlyOwner {
         require(_timeout > 0, "Timeout must be > 0");
         escrowTimeout = _timeout;
@@ -203,12 +135,7 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
     //  FLOW A — Manual Escrow
     // ════════════════════════════════════════════════════════════════════════
 
-    /// @notice Create a standard escrow. Buyer deposits `amount` of an allowed token.
-    /// @param provider      Address of the service provider (payee)
-    /// @param token         ERC-20 token address (must be in allowedTokens)
-    /// @param amount        Amount to escrow
-    /// @param metadataHash  Keccak256 hash of off-chain metadata describing the service
-    /// @return escrowId     The ID of the newly created escrow
+    /// @notice Create a standard escrow. Buyer deposits tokens.
     function createEscrow(
         address provider,
         address token,
@@ -217,7 +144,6 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
     ) external nonReentrant returns (uint256 escrowId) {
         _validateEscrowParams(provider, token, amount);
 
-        // Transfer tokens from buyer to this contract
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
 
         escrowId = escrowCount++;
@@ -229,30 +155,24 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
             metadataHash: metadataHash,
             status: Status.Pending,
             createdAt: block.timestamp,
-            encryptedConditions: "",
-            ctxWallet: address(0),
+            ctxSender: address(0),
             autoSettleInitiated: false
         });
 
         emit EscrowCreated(escrowId, msg.sender, provider, amount, metadataHash);
     }
 
-    /// @notice Manual settlement — buyer provides a quality score.
-    ///         Score >= 5 → provider paid. Score < 5 → buyer refunded.
-    /// @param escrowId     The escrow to settle
-    /// @param qualityScore Quality score (0–10)
+    /// @notice Manual settlement — buyer provides quality score.
     function verifyAndSettle(
         uint256 escrowId,
         uint8 qualityScore
     ) external nonReentrant {
         Escrow storage e = _getValidEscrow(escrowId);
         if (msg.sender != e.buyer) revert NotBuyer(msg.sender, e.buyer);
-
         _settleByScore(escrowId, e, qualityScore);
     }
 
-    /// @notice Buyer claims a refund after the escrow timeout has elapsed.
-    /// @param escrowId  The escrow to refund
+    /// @notice Buyer claims refund after timeout.
     function claimRefund(uint256 escrowId) external nonReentrant {
         Escrow storage e = _getValidEscrow(escrowId);
         if (msg.sender != e.buyer) revert NotBuyer(msg.sender, e.buyer);
@@ -262,13 +182,10 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
 
         e.status = Status.Refunded;
         IERC20(e.token).safeTransfer(e.buyer, e.amount);
-
         emit EscrowRefunded(escrowId);
     }
 
-    /// @notice Owner-only emergency refund after extended timeout (2x normal timeout).
-    ///         Prevents funds from being permanently locked if buyer disappears.
-    /// @param escrowId  The escrow to emergency-refund
+    /// @notice Owner emergency refund after 2x timeout.
     function emergencyRefund(uint256 escrowId) external onlyOwner nonReentrant {
         Escrow storage e = _getValidEscrow(escrowId);
 
@@ -279,28 +196,35 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
 
         e.status = Status.Refunded;
         IERC20(e.token).safeTransfer(e.buyer, e.amount);
-
         emit EscrowRefunded(escrowId);
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    //  FLOW B — BITE V2 Auto-Settlement
+    //  FLOW B — BITE CTX Auto-Settlement
     // ════════════════════════════════════════════════════════════════════════
 
-    /// @notice Create an escrow with encrypted settlement conditions for BITE V2 auto-settle.
-    /// @param provider             Address of the service provider
-    /// @param token                ERC-20 token address
-    /// @param amount               Amount to escrow
-    /// @param encryptedConditions  Encrypted settlement conditions (decrypted by BITE V2 threshold nodes)
-    /// @return escrowId            The ID of the newly created escrow
-    function createEncryptedEscrow(
+    /// @notice Create an escrow and immediately submit a CTX for auto-settlement.
+    ///         The encrypted quality score will be decrypted by BITE validators
+    ///         and `onDecrypt()` will be called in block N+1 to settle.
+    ///
+    /// @param provider         Service provider address
+    /// @param token            ERC-20 token for escrow
+    /// @param amount           Escrow amount
+    /// @param metadataHash     Hash of off-chain metadata
+    /// @param encryptedScore   BITE-encrypted quality score (encrypted via bite.encryptMessage)
+    ///
+    /// @dev Caller must send ETH to cover CTX gas: msg.value covers the callback execution.
+    ///      Gas limit = msg.value / tx.gasprice.
+    function createAndAutoSettle(
         address provider,
         address token,
         uint256 amount,
-        bytes calldata encryptedConditions
-    ) external nonReentrant returns (uint256 escrowId) {
+        bytes32 metadataHash,
+        bytes calldata encryptedScore
+    ) external payable nonReentrant returns (uint256 escrowId) {
         _validateEscrowParams(provider, token, amount);
-        require(encryptedConditions.length > 0, "Empty encrypted conditions");
+        require(encryptedScore.length > 0, "Empty encrypted score");
+        require(msg.value > 0, "Must send ETH for CTX gas");
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
 
@@ -310,110 +234,61 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
             provider: provider,
             token: token,
             amount: amount,
-            metadataHash: keccak256(encryptedConditions),
+            metadataHash: metadataHash,
             status: Status.Pending,
             createdAt: block.timestamp,
-            encryptedConditions: encryptedConditions,
-            ctxWallet: address(0),
-            autoSettleInitiated: false
+            ctxSender: address(0),
+            autoSettleInitiated: true
         });
 
-        emit EscrowCreated(
-            escrowId,
-            msg.sender,
-            provider,
-            amount,
-            keccak256(encryptedConditions)
-        );
+        emit EscrowCreated(escrowId, msg.sender, provider, amount, metadataHash);
+
+        // Submit CTX with encrypted score
+        _submitSettlementCTX(escrowId, encryptedScore);
     }
 
-    /// @notice Step 1 of auto-settle: Get the one-time CTX wallet from BITE V2 and store it.
-    ///         The buyer MUST fund wallet W with enough ETH to cover CTX gas costs
-    ///         BEFORE calling `initiateAutoSettle`.
-    /// @param escrowId  The encrypted escrow to prepare for auto-settlement
-    /// @return wallet   The one-time CTX wallet address that needs to be funded
-    function prepareAutoSettle(
-        uint256 escrowId
-    ) external nonReentrant returns (address wallet) {
-        Escrow storage e = _getValidEscrow(escrowId);
-        if (msg.sender != e.buyer) revert NotBuyer(msg.sender, e.buyer);
-        if (e.encryptedConditions.length == 0) revert NoEncryptedConditions(escrowId);
-        if (e.autoSettleInitiated) revert AutoSettleAlreadyInitiated(escrowId);
-
-        // Get the one-time wallet address from BITE V2 precompile
-        wallet = BITE_V2.getRandomWalletForCTX();
-
-        // Store the wallet address for verification in onDecrypt
-        e.ctxWallet = wallet;
-    }
-
-    /// @notice Step 2 of auto-settle: Schedule the CTX via BITE V2 `decryptAndExecute`.
-    ///         The one-time wallet W must be funded before calling this.
-    ///         The CTX will execute in block N+1 and call `onDecrypt` on this contract.
-    /// @param escrowId  The encrypted escrow to initiate auto-settlement for
-    /// @param gasLimit  Gas limit for the CTX callback execution
+    /// @notice Submit a CTX to auto-settle an existing pending escrow.
+    /// @param escrowId        The escrow to auto-settle
+    /// @param encryptedScore  BITE-encrypted quality score
     function initiateAutoSettle(
         uint256 escrowId,
-        uint256 gasLimit
-    ) external nonReentrant {
+        bytes calldata encryptedScore
+    ) external payable nonReentrant {
         Escrow storage e = _getValidEscrow(escrowId);
         if (msg.sender != e.buyer) revert NotBuyer(msg.sender, e.buyer);
-        if (e.ctxWallet == address(0)) revert AutoSettleNotPrepared(escrowId);
         if (e.autoSettleInitiated) revert AutoSettleAlreadyInitiated(escrowId);
+        require(encryptedScore.length > 0, "Empty encrypted score");
+        require(msg.value > 0, "Must send ETH for CTX gas");
 
         e.autoSettleInitiated = true;
-
-        // plainArgs carries the escrow ID so onDecrypt knows which escrow to settle
-        bytes memory plainArgs = abi.encode(escrowId);
-
-        // Schedule the CTX — BITE V2 threshold nodes will decrypt encryptedConditions
-        // and call onDecrypt on this contract in block N+1 via wallet W
-        BITE_V2.decryptAndExecute(
-            e.encryptedConditions,
-            plainArgs,
-            gasLimit
-        );
-
-        emit AutoSettleInitiated(escrowId, e.ctxWallet);
+        _submitSettlementCTX(escrowId, encryptedScore);
     }
 
-    /// @notice BITE V2 CTX callback — executed by the one-time wallet W in block N+1.
-    ///         Decodes the decrypted quality score and settles the escrow accordingly.
-    /// @dev    IMPORTANT: msg.sender is wallet W (NOT the precompile address).
-    ///         CTXs execute BEFORE regular transactions in block N+1.
-    /// @param decryptedArgs  ABI-encoded (uint256 escrowId, uint8 qualityScore)
-    /// @param plainArgs      ABI-encoded (uint256 escrowId) — used for cross-validation
+    /// @notice BITE CTX callback — called by the callback sender in block N+1.
+    ///         Decodes the decrypted quality score and settles the escrow.
+    /// @param decryptedArguments  Array containing: [0] = decrypted quality score byte
+    /// @param plaintextArguments  Array containing: [0] = ABI-encoded escrow ID
     function onDecrypt(
-        bytes calldata decryptedArgs,
-        bytes calldata plainArgs
+        bytes[] calldata decryptedArguments,
+        bytes[] calldata plaintextArguments
     ) external override nonReentrant {
-        // Decode the plaintext escrow ID (for cross-referencing)
-        uint256 plainEscrowId = abi.decode(plainArgs, (uint256));
+        // Decode escrow ID from plaintext args
+        uint256 escrowId = abi.decode(plaintextArguments[0], (uint256));
 
-        // Decode the decrypted settlement data
-        (uint256 decryptedEscrowId, uint8 qualityScore) = abi.decode(
-            decryptedArgs,
-            (uint256, uint8)
-        );
-
-        // Cross-validate: the escrow ID in plainArgs must match decryptedArgs
-        require(
-            plainEscrowId == decryptedEscrowId,
-            "Escrow ID mismatch between plain and decrypted args"
-        );
-
-        uint256 escrowId = decryptedEscrowId;
         Escrow storage e = _getValidEscrow(escrowId);
 
-        // Security: verify msg.sender is the stored one-time CTX wallet
-        if (msg.sender != e.ctxWallet) {
-            revert UnauthorizedCTXWallet(msg.sender, e.ctxWallet);
+        // Verify caller is the stored CTX callback sender
+        if (msg.sender != e.ctxSender) {
+            revert UnauthorizedCallback(msg.sender, e.ctxSender);
         }
 
-        // Verify auto-settle was actually initiated
         require(e.autoSettleInitiated, "Auto-settle not initiated");
 
-        // Settle based on quality score
+        // Decode quality score from decrypted args (single byte: 0-10)
+        uint8 qualityScore = uint8(bytes1(decryptedArguments[0]));
+        require(qualityScore <= 10, "Invalid quality score");
+
+        // Settle based on quality threshold
         string memory action;
         if (qualityScore >= QUALITY_THRESHOLD) {
             e.status = Status.Settled;
@@ -434,19 +309,16 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
     //  View Functions
     // ════════════════════════════════════════════════════════════════════════
 
-    /// @notice Get full escrow details by ID
     function getEscrow(uint256 escrowId) external view returns (Escrow memory) {
         if (escrowId >= escrowCount) revert InvalidEscrowId(escrowId);
         return escrows[escrowId];
     }
 
-    /// @notice Check if an escrow is expired (past timeout)
     function isExpired(uint256 escrowId) external view returns (bool) {
         if (escrowId >= escrowCount) revert InvalidEscrowId(escrowId);
         return block.timestamp > escrows[escrowId].createdAt + escrowTimeout;
     }
 
-    /// @notice Get the deadline timestamp for an escrow
     function getDeadline(uint256 escrowId) external view returns (uint256) {
         if (escrowId >= escrowCount) revert InvalidEscrowId(escrowId);
         return escrows[escrowId].createdAt + escrowTimeout;
@@ -456,7 +328,36 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
     //  Internal Helpers
     // ════════════════════════════════════════════════════════════════════════
 
-    /// @dev Validate common escrow creation parameters
+    /// @dev Submit a CTX for escrow settlement via BITE precompile
+    function _submitSettlementCTX(
+        uint256 escrowId,
+        bytes calldata encryptedScore
+    ) internal {
+        // Encrypted args: the quality score (decrypted by BITE validators)
+        bytes[] memory encryptedArgs = new bytes[](1);
+        encryptedArgs[0] = encryptedScore;
+
+        // Plaintext args: escrow ID (passed through unchanged for callback identification)
+        bytes[] memory plaintextArgs = new bytes[](1);
+        plaintextArgs[0] = abi.encode(escrowId);
+
+        // Submit CTX — returns the callback sender address
+        address payable callbackSender = BITE.submitCTX(
+            BITE.SUBMIT_CTX_ADDRESS,
+            msg.value / tx.gasprice,
+            encryptedArgs,
+            plaintextArgs
+        );
+
+        // Store callback sender for verification in onDecrypt
+        escrows[escrowId].ctxSender = callbackSender;
+
+        // Fund the callback sender with ETH for CTX gas execution
+        callbackSender.sendValue(msg.value);
+
+        emit AutoSettleInitiated(escrowId, callbackSender);
+    }
+
     function _validateEscrowParams(
         address provider,
         address token,
@@ -469,15 +370,12 @@ contract TwinkleEscrowV3 is Ownable, ReentrancyGuard, IBITECallback {
         if (amount > maxEscrowAmount) revert ExceedsMaxAmount(amount, maxEscrowAmount);
     }
 
-    /// @dev Retrieve an escrow and verify it exists and is still Pending
     function _getValidEscrow(uint256 escrowId) internal view returns (Escrow storage e) {
         if (escrowId >= escrowCount) revert InvalidEscrowId(escrowId);
         e = escrows[escrowId];
         if (e.status != Status.Pending) revert EscrowNotPending(escrowId, e.status);
     }
 
-    /// @dev Settle an escrow based on quality score.
-    ///      Score >= QUALITY_THRESHOLD → provider paid. Below → buyer refunded.
     function _settleByScore(
         uint256 escrowId,
         Escrow storage e,
